@@ -51,19 +51,19 @@ def command_menu(user_id: int) -> ReplyKeyboardMarkup:
         if any(event["code"] == active_event["code"] for event in admin_events):
             rows.extend(
                 [
-                    ["📋 Все окна"],
+                    ["📋 Все записи"],
                     ["➕ Добавить окно"],
                     ["📨 Запросы на запись"],
                     ["✉️ Отказать по заявке"],
                 ]
             )
     if user_id == SUPERADMIN_ID:
-        rows.append(["✨ Создать событие"])
-    rows.append(["🔑 Войти в событие"])
+        rows.append(["✨ Создать зал"])
+    rows.append(["🔑 Войти в зал"])
     if active_event is not None:
-        rows.append(["🚪 Выйти из события"])
+        rows.append(["🚪 Выйти из зала"])
     rows.append(["ℹ️ Помощь"])
-    rows.append(["❌ Отменить ввод"])
+    rows.append(["❌ Отменить"])
     return ReplyKeyboardMarkup(
         rows,
         resize_keyboard=True,
@@ -97,7 +97,7 @@ async def _ask_for_event(
 ) -> None:
     events = database.events_for_user(_user_id(update), admin_only=admin_only)
     if not events:
-        await _reply(update, "Сначала нажмите /join и добавьте событие.")
+        await _reply(update, "Сначала нажмите /join и добавьте зал.")
         return
     active = database.active_event_for_user(_user_id(update))
     if active is not None and any(event["code"] == active["code"] for event in events):
@@ -116,7 +116,7 @@ async def _ask_for_event(
         ]
         if update.effective_message is not None:
             await update.effective_message.reply_text(
-                "Ваши события:", reply_markup=InlineKeyboardMarkup(keyboard)
+                "Ваши залы:", reply_markup=InlineKeyboardMarkup(keyboard)
             )
 
 
@@ -145,7 +145,7 @@ async def _show_admin_slots(
 ) -> None:
     all_slots = database.list_slots(code, user_id, admin_view=True)
     if not all_slots:
-        await _reply(update, "В событии пока нет окон.")
+        await _reply(update, "В зале пока нет окон.")
         return
     lines = [
         f"{row['starts_at']} — "
@@ -183,7 +183,7 @@ async def _show_requests(update: Update, code: str, user_id: int) -> None:
 async def _show_my_bookings(update: Update, code: str, user_id: int) -> None:
     bookings = database.my_bookings(code, user_id)
     if not bookings:
-        await _reply(update, "У вас пока нет запрошенных или запланированных окон.")
+        await _reply(update, "У вас пока нет запрошенных или запланированных записей.")
         return
     status_labels = {
         "pending": "Запрошено",
@@ -193,7 +193,7 @@ async def _show_my_bookings(update: Update, code: str, user_id: int) -> None:
         f"{booking['starts_at']} — {status_labels[booking['status']]}"
         for booking in bookings
     ]
-    await _reply(update, "Ваши окна:\n" + "\n".join(lines))
+    await _reply(update, "Ваши записи:\n" + "\n".join(lines))
 
 
 async def _select_event_action(
@@ -227,9 +227,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     context.user_data.pop("input_flow", None)
     await _reply(
         update,
-        "Бот записи на события.\n"
-        "Используйте русские кнопки меню. Действия по событию доступны, "
-        "только если событие выбрано и вы в него вошли.\n"
+        "Вас приветствует Марина в своем зале!\n"
+        "Можете оставить заявку на запись в свободные окна.\n\n"
         "Команды также можно вводить вручную: /join, /slots, /leave, "
         "/addslot, /event_slots, /requests, /create_event, /reject, /switch.",
     )
@@ -246,7 +245,7 @@ async def create_event(
             update,
             context,
             "create_admin",
-            "Введите Telegram ID администратора события:",
+            "Введите Telegram ID администратора зала:",
         )
         return
     if len(context.args) < 2:
@@ -259,7 +258,7 @@ async def create_event(
             update,
             context,
             "create_title",
-            "Введите название нового события:",
+            "Введите название нового зала:",
             {"admin_id": admin_id},
         )
         return
@@ -277,16 +276,16 @@ async def create_event(
                 if "уже существует" not in str(exc):
                     raise
     except (ValueError, BookingError) as exc:
-        await _reply(update, f"Не удалось создать событие: {exc}")
+        await _reply(update, f"Не удалось создать зал: {exc}")
         return
     await _reply(
         update,
-        f"Событие «{title}» создано. Код: {code}. Администратор: {admin_id}.",
+        f"Зал «{title}» создан. Код: {code}. Администратор: {admin_id}.",
     )
     try:
         await context.bot.send_message(
             admin_id,
-            f"Вас назначили администратором события «{title}» (код {code}).",
+            f"Вас назначили администратором зала «{title}» (код {code}).",
         )
     except TelegramError:
         logger.exception("Could not notify assigned admin %s", admin_id)
@@ -295,7 +294,7 @@ async def create_event(
 async def join_event(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not context.args:
         await _ask_for_input(
-            update, context, "join_code", "Введите 10-значный код события:"
+            update, context, "join_code", "Введите 10-значный код зала:"
         )
         return
     if len(context.args) != 1 or not _valid_code(context.args[0]):
@@ -305,7 +304,7 @@ async def join_event(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         database.join_event(context.args[0], _user_id(update))
         await _reply(
             update,
-            "Вы вошли в событие. Оно запомнено; повторно вводить код не нужно.",
+            "Вы вошли в зал. Оно запомнено; повторно вводить код не нужно.",
         )
     except BookingError as exc:
         await _reply(update, str(exc))
@@ -315,14 +314,14 @@ async def leave_event(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     user_id = _user_id(update)
     events = database.events_for_user(user_id)
     if not events:
-        await _reply(update, "Вы не состоите ни в одном событии.")
+        await _reply(update, "Вы не состоите ни в одном зале.")
         return
     if len(events) == 1:
         try:
             database.leave_event(events[0]["code"], user_id)
             await _reply(
                 update,
-                f"Вы вышли из события «{events[0]['title']}». "
+                f"Вы вышли из зала «{events[0]['title']}». "
                 "Кнопки его действий больше недоступны.",
             )
         except BookingError as exc:
@@ -336,7 +335,7 @@ async def leave_event(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     ] for event in events]
     if update.effective_message is not None:
         await update.effective_message.reply_text(
-            "Выберите событие, из которого хотите выйти:",
+            "Выберите зал, из которого хотите выйти:",
             reply_markup=InlineKeyboardMarkup(keyboard),
         )
 
@@ -344,7 +343,7 @@ async def leave_event(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 async def switch_event(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     events = database.events_for_user(_user_id(update))
     if len(events) < 2:
-        await _reply(update, "Для смены события нужно состоять хотя бы в двух.")
+        await _reply(update, "Для смены зала нужно состоять хотя бы в двух.")
         return
     keyboard = [[
         InlineKeyboardButton(
@@ -354,7 +353,7 @@ async def switch_event(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     ] for event in events]
     if update.effective_message is not None:
         await update.effective_message.reply_text(
-            "Выберите активное событие:",
+            "Выберите активный зал:",
             reply_markup=InlineKeyboardMarkup(keyboard),
         )
 
@@ -477,12 +476,12 @@ async def booking_action(
                 None,
             )
             if event is None:
-                raise BookingError("Вы уже не состоите в этом событии.")
+                raise BookingError("Вы уже не состоите в этом зале.")
             database.leave_event(code, user_id)
-            await query.edit_message_text(f"Вы вышли из события «{event['title']}».")
+            await query.edit_message_text(f"Вы вышли из зала «{event['title']}».")
             await _reply(
                 update,
-                "Кнопки действий события больше недоступны. Чтобы вернуться, нажмите /join.",
+                "Кнопки действий зала больше недоступны. Чтобы вернуться, нажмите /join.",
             )
             return
         if parts[0] == "select" and len(parts) == 2:
@@ -493,12 +492,12 @@ async def booking_action(
                 if item["code"] == parts[1]
             )
             await query.edit_message_text(
-                f"Активное событие: «{event['title']}»."
+                f"Активный зал: «{event['title']}»."
             )
-            await _reply(update, "Готово. Действия используют выбранное событие.")
+            await _reply(update, "Готово. Действия используют выбранный зал.")
             return
         if parts[0] == "event" and len(parts) == 3:
-            await query.edit_message_text("Событие выбрано.")
+            await query.edit_message_text("Зал выбран.")
             await _select_event_action(update, context, parts[1], parts[2])
             return
         action, raw_id = parts
@@ -595,17 +594,17 @@ async def handle_text_input(
     text = message.text.strip()
     menu_actions = {
         "ℹ️ Помощь": start,
-        "🔑 Войти в событие": join_event,
+        "🔑 Войти в зал": join_event,
         "📅 Свободные окна": slots,
         "🗓 Мои записи": my_bookings,
-        "🚪 Выйти из события": leave_event,
-        "🔄 Сменить событие": switch_event,
+        "🚪 Выйти из зала": leave_event,
+        "🔄 Сменить зал": switch_event,
         "➕ Добавить окно": add_slot,
-        "📋 Все окна": event_slots,
+        "📋 Все записи": event_slots,
         "📨 Запросы на запись": requests,
         "✉️ Отказать по заявке": reject_request,
-        "✨ Создать событие": create_event,
-        "❌ Отменить ввод": cancel_input,
+        "✨ Создать зал": create_event,
+        "❌ Отменить": cancel_input,
     }
     menu_action = menu_actions.get(text)
     if menu_action is not None:
@@ -628,12 +627,12 @@ async def handle_text_input(
                 update,
                 context,
                 "create_title",
-                "Введите название нового события:",
+                "Введите название нового зала:",
                 {"admin_id": admin_id},
             )
         elif action == "create_title":
             if not text:
-                raise BookingError("Название события не может быть пустым.")
+                raise BookingError("Название зала не может быть пустым.")
             while True:
                 code = f"{secrets.randbelow(10**10):010d}"
                 try:
@@ -644,13 +643,13 @@ async def handle_text_input(
                         raise
             await _reply(
                 update,
-                f"Событие «{text}» создано. Код: {code}. "
+                f"Зал «{text}» создан. Код: {code}. "
                 f"Администратор: {data['admin_id']}.",
             )
             try:
                 await context.bot.send_message(
                     data["admin_id"],
-                    f"Вас назначили администратором события «{text}» (код {code}).",
+                    f"Вас назначили администратором зала «{text}» (код {code}).",
                 )
             except TelegramError:
                 logger.exception("Could not notify assigned admin %s", data["admin_id"])
@@ -660,7 +659,7 @@ async def handle_text_input(
             database.join_event(text, _user_id(update))
             await _reply(
                 update,
-                f"Вы вошли в событие {text}. Оно запомнено; повторно вводить код не нужно.",
+                f"Вы вошли в зал {text}. Оно запомнено; повторно вводить код не нужно.",
             )
         elif action == "slots_code":
             if not _valid_code(text):
