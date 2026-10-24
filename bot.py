@@ -21,6 +21,7 @@ from telegram.ext import (
     filters,
 )
 
+from calendar_ui import build_calendar, build_hour_keyboard, build_minute_keyboard
 from database import BookingError, Database
 
 load_dotenv()
@@ -214,17 +215,105 @@ async def _select_event_action(
     elif action == "my_bookings":
         await _show_my_bookings(update, code, user_id)
     elif action == "addslot":
-        await _ask_for_input(
-            update,
-            context,
-            "addslot_datetime",
-            "Введите дату и время окна в формате YYYY-MM-DD HH:MM:",
-            {"code": code},
+        await _show_addslot_calendar(update, context, code)
+
+
+async def _show_addslot_calendar(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    code: str,
+    year: Optional[int] = None,
+    month: Optional[int] = None,
+) -> None:
+    database.list_slots(code, _user_id(update), admin_view=True)
+    now = datetime.now()
+    context.user_data["calendar_addslot"] = {
+        "code": code,
+        "year": year or now.year,
+        "month": month or now.month,
+    }
+    if update.effective_message is not None:
+        await update.effective_message.reply_text(
+            "Выберите дату свободного окна:",
+            reply_markup=build_calendar(
+                context.user_data["calendar_addslot"]["year"],
+                context.user_data["calendar_addslot"]["month"],
+            ),
         )
+
+
+async def calendar_action(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    query = update.callback_query
+    if query is None or query.data is None:
+        return
+    await query.answer()
+    try:
+        parts = query.data.split(":")
+        if parts[1] == "noop":
+            return
+        flow = context.user_data.get("calendar_addslot")
+        if flow is None:
+            raise BookingError("Календарь устарел. Нажмите «Добавить окно» ещё раз.")
+        code = flow["code"]
+        user_id = _user_id(update)
+        database.list_slots(code, user_id, admin_view=True)
+
+        if parts[1] == "month" and len(parts) == 4:
+            year, month = int(parts[2]), int(parts[3])
+            build_calendar(year, month)
+            flow.update(year=year, month=month)
+            await query.edit_message_text(
+                "Выберите дату свободного окна:",
+                reply_markup=build_calendar(year, month),
+            )
+        elif parts[1] == "day" and len(parts) == 3:
+            selected_date = datetime.strptime(parts[2], "%Y-%m-%d").date()
+            flow["date"] = selected_date.isoformat()
+            await query.edit_message_text(
+                f"Дата: {selected_date:%d.%m.%Y}\nВыберите час:",
+                reply_markup=build_hour_keyboard(),
+            )
+        elif parts[1] == "hour" and len(parts) == 3:
+            hour = int(parts[2])
+            if not 0 <= hour <= 23 or "date" not in flow:
+                raise BookingError("Выберите дату и время заново.")
+            flow["hour"] = hour
+            await query.edit_message_text(
+                f"Дата: {flow['date']}, час: {hour:02d}\nВыберите минуты:",
+                reply_markup=build_minute_keyboard(),
+            )
+        elif parts[1] == "back":
+            await query.edit_message_text(
+                "Выберите дату свободного окна:",
+                reply_markup=build_calendar(flow["year"], flow["month"]),
+            )
+        elif parts[1] == "back_hour" and "date" in flow:
+            await query.edit_message_text(
+                f"Дата: {flow['date']}\nВыберите час:",
+                reply_markup=build_hour_keyboard(),
+            )
+        elif parts[1] == "minute" and len(parts) == 3:
+            minute = int(parts[2])
+            if minute not in (0, 15, 30, 45) or "date" not in flow or "hour" not in flow:
+                raise BookingError("Выберите дату и время заново.")
+            starts_at = datetime.strptime(
+                f"{flow['date']} {flow['hour']:02d}:{minute:02d}",
+                "%Y-%m-%d %H:%M",
+            ).strftime("%Y-%m-%d %H:%M")
+            database.add_slot(code, starts_at, user_id)
+            context.user_data.pop("calendar_addslot", None)
+            await query.edit_message_text(f"Свободное окно {starts_at} добавлено.")
+        else:
+            raise BookingError("Неизвестное действие календаря.")
+    except (BookingError, ValueError) as exc:
+        await query.edit_message_text(str(exc))
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     context.user_data.pop("input_flow", None)
+    context.user_data.pop("calendar_addslot", None)
     await _reply(
         update,
         "Вас приветствует Марина в своем зале!\n"
@@ -387,13 +476,7 @@ async def add_slot(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         except BookingError as exc:
             await _reply(update, str(exc))
             return
-        await _ask_for_input(
-            update,
-            context,
-            "addslot_datetime",
-            "Введите дату и время окна в формате YYYY-MM-DD HH:MM:",
-            {"code": context.args[0]},
-        )
+        await _show_addslot_calendar(update, context, context.args[0])
         return
     if len(context.args) < 2 or not _valid_code(context.args[0]):
         await _reply(
@@ -720,6 +803,7 @@ async def handle_text_input(
 
 async def cancel_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     context.user_data.pop("input_flow", None)
+    context.user_data.pop("calendar_addslot", None)
     await _reply(update, "Ввод отменён.")
 
 
@@ -751,6 +835,7 @@ def main() -> None:
     application.add_handler(CommandHandler("my_bookings", my_bookings))
     application.add_handler(CommandHandler("reject", reject_request))
     application.add_handler(CommandHandler("cancel", cancel_input))
+    application.add_handler(CallbackQueryHandler(calendar_action, pattern=r"^cal:"))
     application.add_handler(CallbackQueryHandler(booking_action))
     application.add_handler(
         MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_input)
