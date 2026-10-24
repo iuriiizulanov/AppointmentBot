@@ -238,9 +238,13 @@ class Database:
             if admin_view:
                 self._authorized_event(connection, code, user_id)
                 return connection.execute(
-                    "SELECT s.*, br.user_id AS booked_by FROM slots s "
-                    "LEFT JOIN booking_requests br "
-                    "ON br.slot_id = s.id AND br.status = 'approved' "
+                    "SELECT s.*, "
+                    "approved.user_id AS booked_by, pending.user_id AS pending_by "
+                    "FROM slots s "
+                    "LEFT JOIN booking_requests approved "
+                    "ON approved.slot_id = s.id AND approved.status = 'approved' "
+                    "LEFT JOIN booking_requests pending "
+                    "ON pending.slot_id = s.id AND pending.status = 'pending' "
                     "WHERE s.event_id = ? ORDER BY s.starts_at",
                     (event["id"],),
                 ).fetchall()
@@ -252,9 +256,104 @@ class Database:
                 raise BookingError("Сначала добавьте событие командой /join.")
             return connection.execute(
                 "SELECT * FROM slots WHERE event_id = ? AND status = 'open' "
+                "AND NOT EXISTS (SELECT 1 FROM booking_requests br "
+                "WHERE br.slot_id = slots.id AND br.status = 'pending') "
                 "ORDER BY starts_at",
                 (event["id"],),
             ).fetchall()
+
+    def is_event_admin(self, code: str, user_id: int) -> bool:
+        with self._connection() as connection:
+            event = connection.execute(
+                "SELECT * FROM events WHERE code = ?", (code,)
+            ).fetchone()
+            if event is None:
+                raise BookingError("Событие с таким кодом не найдено.")
+            member = connection.execute(
+                "SELECT 1 FROM members WHERE event_id = ? AND user_id = ?",
+                (event["id"], user_id),
+            ).fetchone()
+            if member is None:
+                raise BookingError("Сначала добавьте это событие командой /join.")
+            return user_id in (event["admin_id"], event["superadmin_id"])
+
+    def delete_open_slot(self, slot_id: int, admin_id: int) -> str:
+        with self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT s.*, e.code FROM slots s "
+                "JOIN events e ON e.id = s.event_id WHERE s.id = ?",
+                (slot_id,),
+            ).fetchone()
+            if row is None:
+                raise BookingError("Окно не найдено.")
+            self._authorized_event(connection, row["code"], admin_id)
+            if row["status"] != "open":
+                raise BookingError("Удалить можно только свободное окно.")
+            pending = connection.execute(
+                "SELECT 1 FROM booking_requests "
+                "WHERE slot_id = ? AND status = 'pending'",
+                (slot_id,),
+            ).fetchone()
+            if pending is not None:
+                raise BookingError(
+                    "На это окно уже отправлен запрос. Сначала обработайте его."
+                )
+            connection.execute("DELETE FROM slots WHERE id = ?", (slot_id,))
+            return row["starts_at"]
+
+    def scheduled_bookings(self, code: str, admin_id: int):
+        with self._connection() as connection:
+            event = self._authorized_event(connection, code, admin_id)
+            return connection.execute(
+                "SELECT br.id AS request_id, br.user_id, s.starts_at "
+                "FROM booking_requests br "
+                "JOIN slots s ON s.id = br.slot_id "
+                "WHERE s.event_id = ? AND br.status = 'approved' "
+                "AND s.status = 'booked' ORDER BY s.starts_at",
+                (event["id"],),
+            ).fetchall()
+
+    def cancel_scheduled_booking(
+        self, request_id: int, admin_id: int, message: str
+    ):
+        with self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            request = connection.execute(
+                "SELECT br.*, s.event_id, s.starts_at, s.status AS slot_status "
+                "FROM booking_requests br JOIN slots s ON s.id = br.slot_id "
+                "WHERE br.id = ?",
+                (request_id,),
+            ).fetchone()
+            if request is None:
+                raise BookingError("Запись не найдена.")
+            event = connection.execute(
+                "SELECT * FROM events WHERE id = ?", (request["event_id"],)
+            ).fetchone()
+            if admin_id not in (event["admin_id"], event["superadmin_id"]):
+                raise BookingError("У вас нет прав администратора этого события.")
+            member = connection.execute(
+                "SELECT 1 FROM members WHERE event_id = ? AND user_id = ?",
+                (event["id"], admin_id),
+            ).fetchone()
+            if member is None:
+                raise BookingError("Сначала добавьте это событие командой /join.")
+            if request["status"] != "approved" or request["slot_status"] != "booked":
+                raise BookingError("Эта запись больше не запланирована.")
+            connection.execute(
+                "UPDATE booking_requests SET status = 'rejected', "
+                "rejection_message = ? WHERE id = ?",
+                (message, request_id),
+            )
+            connection.execute(
+                "UPDATE slots SET status = 'open' WHERE id = ?",
+                (request["slot_id"],),
+            )
+            return {
+                "user_id": request["user_id"],
+                "starts_at": request["starts_at"],
+                "code": event["code"],
+            }
 
     def request_slot(self, code: str, slot_id: int, user_id: int) -> int:
         try:

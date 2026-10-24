@@ -55,7 +55,7 @@ def command_menu(user_id: int) -> ReplyKeyboardMarkup:
                     ["📋 Все записи"],
                     ["➕ Добавить окно"],
                     ["📨 Запросы на запись"],
-                    ["✉️ Отказать по заявке"],
+                    ["❌ Отменить тренировку"],
                 ]
             )
     if user_id == SUPERADMIN_ID:
@@ -124,20 +124,60 @@ async def _ask_for_event(
 async def _show_available_slots(
     update: Update, code: str, user_id: int
 ) -> None:
-    available = database.list_slots(code, user_id)
+    is_admin = database.is_event_admin(code, user_id)
+    available = database.list_slots(code, user_id, admin_view=is_admin)
+    if is_admin:
+        available = [
+            slot
+            for slot in available
+            if slot["status"] == "open" and slot["pending_by"] is None
+        ]
     if not available:
         await _reply(update, "Свободных окон пока нет.")
         return
     keyboard = [[
         InlineKeyboardButton(
-            f"Запросить {slot['starts_at']}",
-            callback_data=f"book:{slot['id']}",
+            (
+                f"Удалить {slot['starts_at']}"
+                if is_admin
+                else f"Запросить {slot['starts_at']}"
+            ),
+            callback_data=(
+                f"delete_slot:{slot['id']}"
+                if is_admin
+                else f"book:{slot['id']}"
+            ),
         )
     ] for slot in available]
     message = update.effective_message
     if message is not None:
         await message.reply_text(
-            "Доступные окна:", reply_markup=InlineKeyboardMarkup(keyboard)
+            (
+                "Выберите свободное окно для удаления:"
+                if is_admin
+                else "Выберите свободное окно для отправки запроса:"
+            ),
+            reply_markup=InlineKeyboardMarkup(keyboard),
+        )
+
+
+async def _show_scheduled_bookings(
+    update: Update, code: str, user_id: int
+) -> None:
+    scheduled = database.scheduled_bookings(code, user_id)
+    if not scheduled:
+        await _reply(update, "Нет запланированных тренировок для отмены.")
+        return
+    keyboard = [[
+        InlineKeyboardButton(
+            f"{booking['starts_at']} — пользователь {booking['user_id']}",
+            callback_data=f"cancel_training:{booking['request_id']}",
+        )
+    ] for booking in scheduled]
+    if update.effective_message is not None:
+        await update.effective_message.reply_text(
+            "Выберите тренировку для отмены:",
+            reply_markup=InlineKeyboardMarkup(keyboard),
         )
 
 
@@ -212,6 +252,8 @@ async def _select_event_action(
         await _show_admin_slots(update, code, user_id)
     elif action == "requests":
         await _show_requests(update, code, user_id)
+    elif action == "cancel_training":
+        await _show_scheduled_bookings(update, code, user_id)
     elif action == "my_bookings":
         await _show_my_bookings(update, code, user_id)
     elif action == "addslot":
@@ -251,6 +293,7 @@ async def calendar_action(
     await query.answer()
     try:
         parts = query.data.split(":")
+        admin_id = _user_id(update)
         if parts[1] == "noop":
             return
         flow = context.user_data.get("calendar_addslot")
@@ -525,6 +568,20 @@ async def requests(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     except BookingError as exc:
         await _reply(update, str(exc))
 
+
+async def cancel_training(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    user_id = _user_id(update)
+    active = database.active_event_for_user(user_id)
+    if active is None or not database.is_event_admin(active["code"], user_id):
+        await _reply(update, "Для отмены тренировок нужен активный зал администратора.")
+        return
+    try:
+        await _show_scheduled_bookings(update, active["code"], user_id)
+    except BookingError as exc:
+        await _reply(update, str(exc))
+
 async def my_bookings(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not context.args:
         await _ask_for_event(update, context, "my_bookings", admin_only=False)
@@ -536,6 +593,30 @@ async def my_bookings(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         await _select_event_action(update, context, "my_bookings", context.args[0])
     except BookingError as exc:
         await _reply(update, str(exc))
+
+
+async def _request_training_cancellation(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    request_id: int,
+) -> None:
+    user_id = _user_id(update)
+    active = database.active_event_for_user(user_id)
+    if active is None:
+        raise BookingError("Сначала выберите активный зал.")
+    scheduled = database.scheduled_bookings(active["code"], user_id)
+    if not any(item["request_id"] == request_id for item in scheduled):
+        raise BookingError("Эта тренировка уже не запланирована.")
+    context.user_data["input_flow"] = {
+        "action": "cancel_training_message",
+        "data": {"request_id": request_id},
+    }
+    query = update.callback_query
+    if query is not None:
+        await query.edit_message_text(
+            f"Введите сообщение для пользователя по тренировке #{request_id}. "
+            "После отправки время снова станет свободным."
+        )
 
 
 async def booking_action(
@@ -583,9 +664,53 @@ async def booking_action(
             await query.edit_message_text("Зал выбран.")
             await _select_event_action(update, context, parts[1], parts[2])
             return
+        if parts[0] == "cancel_training" and len(parts) == 2:
+            await _request_training_cancellation(
+                update, context, int(parts[1])
+            )
+            return
+        if parts[0] == "delete_slot" and len(parts) == 2:
+            slot_id = int(parts[1])
+            active_event = database.active_event_for_user(admin_id)
+            if active_event is None:
+                raise BookingError("Сначала выберите активный зал.")
+            slot = next(
+                (
+                    item
+                    for item in database.list_slots(
+                        active_event["code"],
+                        admin_id,
+                        admin_view=True,
+                    )
+                    if item["id"] == slot_id
+                    and item["status"] == "open"
+                    and item["pending_by"] is None
+                ),
+                None,
+            )
+            if slot is None:
+                raise BookingError("Свободное окно не найдено или уже изменилось.")
+            await query.edit_message_text(
+                f"Удалить свободное окно {slot['starts_at']}?",
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton(
+                        "Да, удалить", callback_data=f"confirm_delete_slot:{slot_id}"
+                    ),
+                    InlineKeyboardButton(
+                        "Не удалять", callback_data=f"cancel_delete_slot:{slot_id}"
+                    ),
+                ]]),
+            )
+            return
+        if parts[0] == "confirm_delete_slot" and len(parts) == 2:
+            starts_at = database.delete_open_slot(int(parts[1]), admin_id)
+            await query.edit_message_text(f"Свободное окно {starts_at} удалено.")
+            return
+        if parts[0] == "cancel_delete_slot" and len(parts) == 2:
+            await query.edit_message_text("Удаление окна отменено.")
+            return
         action, raw_id = parts
         item_id = int(raw_id)
-        admin_id = _user_id(update)
         if action == "book":
             event_code = database.event_code_for_slot(item_id)
             if event_code is None:
@@ -685,7 +810,7 @@ async def handle_text_input(
         "➕ Добавить окно": add_slot,
         "📋 Все записи": event_slots,
         "📨 Запросы на запись": requests,
-        "✉️ Отказать по заявке": reject_request,
+        "❌ Отменить тренировку": cancel_training,
         "✨ Создать зал": create_event,
         "❌ Отменить": cancel_input,
     }
@@ -796,6 +921,31 @@ async def handle_text_input(
             await _reply(
                 update, f"Запрос #{data['request_id']} отклонён, ответ отправлен."
             )
+        elif action == "cancel_training_message":
+            cancellation = database.cancel_scheduled_booking(
+                data["request_id"], _user_id(update), text
+            )
+            try:
+                await context.bot.send_message(
+                    cancellation["user_id"],
+                    f"Тренировка {cancellation['starts_at']} отменена. "
+                    f"Сообщение администратора: {text}",
+                )
+                notification_status = "Участник уведомлён."
+            except TelegramError:
+                logger.exception(
+                    "Could not notify user %s about training cancellation",
+                    cancellation["user_id"],
+                )
+                notification_status = (
+                    "Время освобождено, но не удалось доставить уведомление "
+                    "участнику."
+                )
+            await _reply(
+                update,
+                f"Тренировка {cancellation['starts_at']} отменена, время свободно. "
+                f"{notification_status}",
+            )
     except (BookingError, ValueError) as exc:
         context.user_data["input_flow"] = flow
         await _reply(update, str(exc))
@@ -832,6 +982,7 @@ def main() -> None:
     application.add_handler(CommandHandler("addslot", add_slot))
     application.add_handler(CommandHandler("event_slots", event_slots))
     application.add_handler(CommandHandler("requests", requests))
+    application.add_handler(CommandHandler("cancel_training", cancel_training))
     application.add_handler(CommandHandler("my_bookings", my_bookings))
     application.add_handler(CommandHandler("reject", reject_request))
     application.add_handler(CommandHandler("cancel", cancel_input))

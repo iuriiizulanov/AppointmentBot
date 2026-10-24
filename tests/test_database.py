@@ -28,6 +28,46 @@ class DatabaseTests(unittest.TestCase):
         self.assertEqual(slots[0]["status"], "booked")
         self.assertEqual(slots[0]["booked_by"], 3)
 
+    def test_admin_can_delete_free_slot_but_not_pending_request_slot(self):
+        self.database.add_slot("0123456789", "2026-10-25 12:30", 2)
+        self.database.add_slot("0123456789", "2026-10-26 12:30", 2)
+        free_slot, requested_slot = self.database.list_slots(
+            "0123456789", 2, admin_view=True
+        )
+        self.database.join_event("0123456789", 3)
+        self.database.request_slot("0123456789", requested_slot["id"], 3)
+
+        self.assertEqual(
+            self.database.delete_open_slot(free_slot["id"], 2),
+            "2026-10-25 12:30",
+        )
+        with self.assertRaises(BookingError):
+            self.database.delete_open_slot(requested_slot["id"], 2)
+
+    def test_cancel_scheduled_booking_frees_slot_and_returns_user_details(self):
+        self.database.join_event("0123456789", 3)
+        self.database.add_slot("0123456789", "2026-10-25 12:30", 2)
+        slot_id = self.database.list_slots("0123456789", 3)[0]["id"]
+        request_id = self.database.request_slot("0123456789", slot_id, 3)
+        self.database.approve(request_id, 2)
+
+        result = self.database.cancel_scheduled_booking(
+            request_id, 2, "Тренировка отменяется"
+        )
+
+        self.assertEqual(
+            result,
+            {
+                "user_id": 3,
+                "starts_at": "2026-10-25 12:30",
+                "code": "0123456789",
+            },
+        )
+        self.assertEqual(len(self.database.list_slots("0123456789", 3)), 1)
+        self.assertEqual(self.database.my_bookings("0123456789", 3), [])
+        with self.assertRaises(BookingError):
+            self.database.cancel_scheduled_booking(request_id, 2, "Повторно")
+
     def test_request_details_checks_event_admin_membership(self):
         self.database.join_event("0123456789", 3)
         self.database.add_slot("0123456789", "2026-10-25 12:30", 2)
