@@ -41,6 +41,30 @@ class DatabaseTests(unittest.TestCase):
         with self.assertRaises(BookingError):
             self.database.request_details(request_id, 4)
 
+    def test_my_bookings_shows_requested_and_scheduled_not_rejected(self):
+        self.database.join_event("0123456789", 3)
+        for starts_at in (
+            "2026-10-25 12:30",
+            "2026-10-26 12:30",
+            "2026-10-27 12:30",
+        ):
+            self.database.add_slot("0123456789", starts_at, 2)
+        slots = self.database.list_slots("0123456789", 3)
+        pending_id = self.database.request_slot("0123456789", slots[0]["id"], 3)
+        approved_id = self.database.request_slot("0123456789", slots[1]["id"], 3)
+        rejected_id = self.database.request_slot("0123456789", slots[2]["id"], 3)
+
+        self.database.approve(approved_id, 2)
+        self.database.reject(rejected_id, 2, "Время недоступно")
+        bookings = self.database.my_bookings("0123456789", 3)
+
+        self.assertEqual(
+            [(row["request_id"], row["status"]) for row in bookings],
+            [(pending_id, "pending"), (approved_id, "approved")],
+        )
+        with self.assertRaises(BookingError):
+            self.database.my_bookings("0123456789", 4)
+
     def test_only_one_pending_request_per_slot(self):
         self.database.join_event("0123456789", 3)
         self.database.join_event("0123456789", 4)

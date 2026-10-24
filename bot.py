@@ -44,22 +44,25 @@ def _user_id(update: Update) -> int:
 
 def command_menu(user_id: int) -> ReplyKeyboardMarkup:
     active_event = database.active_event_for_user(user_id)
-    rows = [["ℹ️ Помощь"], ["🔑 Войти в событие"]]
+    rows = []
     if active_event is not None:
-        rows.append(["📅 Свободные окна", "🚪 Выйти из события"])
-        events = database.events_for_user(user_id)
-        if len(events) > 1:
-            rows.append(["🔄 Сменить событие"])
+        rows.extend([["🗓 Мои записи"], ["📅 Свободные окна"]])
         admin_events = database.events_for_user(user_id, admin_only=True)
         if any(event["code"] == active_event["code"] for event in admin_events):
             rows.extend(
                 [
-                    ["➕ Добавить окно", "📋 Все окна"],
-                    ["📨 Запросы на запись", "✉️ Отказать по заявке"],
+                    ["📋 Все окна"],
+                    ["➕ Добавить окно"],
+                    ["📨 Запросы на запись"],
+                    ["✉️ Отказать по заявке"],
                 ]
             )
     if user_id == SUPERADMIN_ID:
         rows.append(["✨ Создать событие"])
+    rows.append(["🔑 Войти в событие"])
+    if active_event is not None:
+        rows.append(["🚪 Выйти из события"])
+    rows.append(["ℹ️ Помощь"])
     rows.append(["❌ Отменить ввод"])
     return ReplyKeyboardMarkup(
         rows,
@@ -177,6 +180,21 @@ async def _show_requests(update: Update, code: str, user_id: int) -> None:
                 reply_markup=keyboard,
             )
 
+async def _show_my_bookings(update: Update, code: str, user_id: int) -> None:
+    bookings = database.my_bookings(code, user_id)
+    if not bookings:
+        await _reply(update, "У вас пока нет запрошенных или запланированных окон.")
+        return
+    status_labels = {
+        "pending": "Запрошено",
+        "approved": "Запланировано",
+    }
+    lines = [
+        f"{booking['starts_at']} — {status_labels[booking['status']]}"
+        for booking in bookings
+    ]
+    await _reply(update, "Ваши окна:\n" + "\n".join(lines))
+
 
 async def _select_event_action(
     update: Update,
@@ -193,6 +211,8 @@ async def _select_event_action(
         await _show_admin_slots(update, code, user_id)
     elif action == "requests":
         await _show_requests(update, code, user_id)
+    elif action == "my_bookings":
+        await _show_my_bookings(update, code, user_id)
     elif action == "addslot":
         await _ask_for_input(
             update,
@@ -423,6 +443,18 @@ async def requests(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     except BookingError as exc:
         await _reply(update, str(exc))
 
+async def my_bookings(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not context.args:
+        await _ask_for_event(update, context, "my_bookings", admin_only=False)
+        return
+    if len(context.args) != 1 or not _valid_code(context.args[0]):
+        await _reply(update, "Формат: /my_bookings <10-значный код>")
+        return
+    try:
+        await _select_event_action(update, context, "my_bookings", context.args[0])
+    except BookingError as exc:
+        await _reply(update, str(exc))
+
 
 async def booking_action(
     update: Update, context: ContextTypes.DEFAULT_TYPE
@@ -565,6 +597,7 @@ async def handle_text_input(
         "ℹ️ Помощь": start,
         "🔑 Войти в событие": join_event,
         "📅 Свободные окна": slots,
+        "🗓 Мои записи": my_bookings,
         "🚪 Выйти из события": leave_event,
         "🔄 Сменить событие": switch_event,
         "➕ Добавить окно": add_slot,
@@ -657,6 +690,10 @@ async def handle_text_input(
             if not _valid_code(text):
                 raise BookingError("Код должен содержать ровно 10 цифр.")
             await _select_event_action(update, context, "requests", text)
+        elif action == "my_bookings_code":
+            if not _valid_code(text):
+                raise BookingError("Код должен содержать ровно 10 цифр.")
+            await _select_event_action(update, context, "my_bookings", text)
         elif action == "reject_id":
             request_id = int(text)
             await database.request_details(request_id, _user_id(update))
@@ -712,6 +749,7 @@ def main() -> None:
     application.add_handler(CommandHandler("addslot", add_slot))
     application.add_handler(CommandHandler("event_slots", event_slots))
     application.add_handler(CommandHandler("requests", requests))
+    application.add_handler(CommandHandler("my_bookings", my_bookings))
     application.add_handler(CommandHandler("reject", reject_request))
     application.add_handler(CommandHandler("cancel", cancel_input))
     application.add_handler(CallbackQueryHandler(booking_action))

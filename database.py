@@ -317,6 +317,29 @@ class Database:
                 (event["id"],),
             ).fetchall()
 
+    def my_bookings(self, code: str, user_id: int):
+        with self._connection() as connection:
+            event = connection.execute(
+                "SELECT id FROM events WHERE code = ?", (code,)
+            ).fetchone()
+            if event is None:
+                raise BookingError("Событие с таким кодом не найдено.")
+            member = connection.execute(
+                "SELECT 1 FROM members WHERE event_id = ? AND user_id = ?",
+                (event["id"], user_id),
+            ).fetchone()
+            if member is None:
+                raise BookingError("Сначала добавьте это событие командой /join.")
+            return connection.execute(
+                "SELECT br.id AS request_id, br.status, s.starts_at "
+                "FROM booking_requests br "
+                "JOIN slots s ON s.id = br.slot_id "
+                "WHERE s.event_id = ? AND br.user_id = ? "
+                "AND br.status IN ('pending', 'approved') "
+                "ORDER BY s.starts_at",
+                (event["id"], user_id),
+            ).fetchall()
+
     def approve(self, request_id: int, admin_id: int) -> int:
         try:
             with self._connection() as connection:
