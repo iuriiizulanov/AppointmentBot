@@ -628,6 +628,7 @@ async def booking_action(
     await query.answer()
     try:
         parts = query.data.split(":")
+        admin_id = _user_id(update)
         if parts[0] == "leave" and len(parts) == 2:
             user_id = _user_id(update)
             code = parts[1]
